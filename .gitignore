@@ -1,4 +1,22 @@
+# --- Dependencias ---
 node_modules/
+
+# --- Variables de entorno ---
 .env
+
+# --- Logs ---
 *.log
-*.json
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Archivos del sistema ---
+.DS_Store
+Thumbs.db
+
+# --- Credenciales sensibles (ejemplo: si algún día exportas tu JSON de GCP) ---
+gcp-key.json
+
+# --- Salidas temporales ---
+*.tmp
+*.swp
