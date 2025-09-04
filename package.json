@@ -1,0 +1,13 @@
+{
+  "name": "linaspedidos-voice",
+  "version": "1.0.0",
+  "main": "server.js",
+  "type": "commonjs",
+  "engines": { "node": ">=18" },
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "@google-cloud/speech": "^6.5.0",
+    "@google-cloud/text-to-speech": "^5.3.0",
+    "express": "^4.19.2"
+  }
+}
