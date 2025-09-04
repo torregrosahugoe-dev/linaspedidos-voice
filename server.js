@@ -1,202 +1,160 @@
 // server.js
-// LinasPedidos Voice API — Heroku
-// Endpoints: /health, /tts, /stt
-
-const express = require("express");
-const cors = require("cors");
-const { TextToSpeechClient } = require("@google-cloud/text-to-speech");
-const { v1: SpeechV1 } = require("@google-cloud/speech");
+const express = require('express');
+const bodyParser = require('body-parser');
+const axios = require('axios');
+const { TextToSpeechClient } = require('@google-cloud/text-to-speech');
+const { SpeechClient } = require('@google-cloud/speech');
 
 const app = express();
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.json());
 
-// Permitir JSON grande (audio en base64)
-app.use(express.json({ limit: "25mb" }));
-app.use(cors());
+// ------- Credenciales GCP desde Config Var (JSON en texto) -------
+const CREDS = process.env.GOOGLE_APPLICATION_CREDENTIALS
+  ? JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS)
+  : null;
+if (!CREDS) {
+  console.error('Falta GOOGLE_APPLICATION_CREDENTIALS en Config Vars de Heroku');
+}
+const projectId = CREDS?.project_id;
+const gopts = CREDS ? { credentials: CREDS, projectId } : {};
 
-// --- Autenticación: GOOGLE_APPLICATION_CREDENTIALS_JSON (Heroku Config Var) ---
-function buildGcpClientOptions() {
-  const raw = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
-  if (!raw) return {};
+const ttsClient = new TextToSpeechClient(gopts);
+const sttClient = new SpeechClient(gopts);
+
+// ------- Utilidades -------
+function absUrl(req, path, qs = '') {
+  const base = `${req.protocol}://${req.get('host')}`;
+  return `${base}${path}${qs}`;
+}
+
+// Crea cabecera WAV (mono, 16-bit, 8kHz) y concatena con PCM LINEAR16
+function makeWavFromLinear16(pcmBuffer, sampleRate = 8000) {
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
+  const blockAlign = (numChannels * bitsPerSample) / 8;
+  const dataSize = pcmBuffer.length;
+  const header = Buffer.alloc(44);
+
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + dataSize, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16); // Subchunk1Size
+  header.writeUInt16LE(1, 20);  // PCM
+  header.writeUInt16LE(numChannels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(dataSize, 40);
+
+  return Buffer.concat([header, pcmBuffer]);
+}
+
+// ------- Rutas -------
+
+// Salud
+app.get('/health', (_req, res) => res.type('text/plain').send('OK'));
+
+// TwiML de inicio (GET y POST para poder verlo en navegador)
+function buildCallTwiml(req) {
+  const ttsUrl = absUrl(req, '/tts', '?text=' + encodeURIComponent(
+    'Hola, bienvenido a Linas Pedidos. Por favor di tu pedido después del tono.'
+  ));
+  const sttUrl = absUrl(req, '/stt');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Play>${ttsUrl}</Play>
+  <Record action="${sttUrl}" method="POST" maxLength="8" playBeep="true" trim="trim-silence"/>
+</Response>`;
+}
+app.get('/call', (req, res) => res.type('text/xml').send(buildCallTwiml(req)));
+app.post('/call', (req, res) => res.type('text/xml').send(buildCallTwiml(req)));
+
+// TTS: devuelve WAV 8k
+app.get('/tts', async (req, res) => {
   try {
-    const j = JSON.parse(raw);
-    return {
-      projectId: j.project_id,
-      credentials: {
-        client_email: j.client_email,
-        private_key: j.private_key,
-      },
-    };
-  } catch (e) {
-    console.error("No se pudo parsear GOOGLE_APPLICATION_CREDENTIALS_JSON:", e);
-    return {};
-  }
-}
-
-const clientOptions = buildGcpClientOptions();
-const ttsClient = new TextToSpeechClient(clientOptions);
-const speechClient = new SpeechV1.SpeechClient(clientOptions);
-
-// ---- Helpers ----
-function audioMime(encoding) {
-  switch (encoding) {
-    case "OGG_OPUS":
-      return "audio/ogg";
-    case "LINEAR16":
-      return "audio/wav";
-    case "MP3":
-    default:
-      return "audio/mpeg";
-  }
-}
-
-function ensureString(v, def = "") {
-  return typeof v === "string" ? v : def;
-}
-
-function ensureNumber(v, def) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : def;
-}
-
-function isTruthy(v) {
-  return v === true || v === "true" || v === 1 || v === "1";
-}
-
-// ---- Rutas ----
-app.get("/health", (_req, res) => res.json({ ok: true }));
-
-/**
- * POST /tts
- * Body:
- * {
- *   "text": "Hola...",
- *   "languageCode": "es-CO",
- *   "voiceName": "es-CO-Standard-A" | "es-CO-Wavenet-A" (opcional)
- *   "audioEncoding": "MP3"|"OGG_OPUS"|"LINEAR16",
- *   "speakingRate": 1.0,
- *   "pitch": 0.0
- * }
- * Responde binario de audio (Content-Type acorde).
- */
-app.post("/tts", async (req, res) => {
-  try {
-    const text = ensureString(req.body.text, "").trim();
-    if (!text) {
-      return res.status(400).json({ error: "Falta 'text'." });
-    }
-
-    const languageCode = ensureString(req.body.languageCode, "es-CO");
-    const voiceName = ensureString(req.body.voiceName); // opcional
-    const audioEncoding = ensureString(req.body.audioEncoding, "MP3");
-    const speakingRate = ensureNumber(req.body.speakingRate, 1.0);
-    const pitch = ensureNumber(req.body.pitch, 0.0);
-
-    const request = {
+    const text = req.query.text || 'Hola. Bienvenido a Linas.';
+    const [resp] = await ttsClient.synthesizeSpeech({
       input: { text },
-      voice: {
-        languageCode,
-        ...(voiceName ? { name: voiceName } : {}),
-      },
-      audioConfig: {
-        audioEncoding, // "MP3" | "OGG_OPUS" | "LINEAR16"
-        speakingRate,
-        pitch,
-      },
-    };
-
-    const [resp] = await ttsClient.synthesizeSpeech(request);
-    const audio = resp.audioContent;
-    if (!audio) {
-      return res.status(500).json({ error: "No se recibió audio de TTS." });
-    }
-
-    res.setHeader("Content-Type", audioMime(audioEncoding));
-    res.setHeader("Content-Length", Buffer.byteLength(audio));
-    return res.status(200).send(Buffer.from(audio, "base64"));
-  } catch (err) {
-    console.error("TTS error:", err);
-    return res.status(500).json({ error: String(err?.message || err) });
-  }
-});
-
-/**
- * POST /stt
- * Body mínimo:
- * {
- *   "audioContent": "<BASE64>",
- *   "encoding": "MP3" | "LINEAR16",
- *   "languageCode": "es-CO",
- *   "sampleRateHertz": 16000 (solo si LINEAR16 y lo conoces)
- * }
- * Opcionales para mayor precisión (por defecto activado):
- * {
- *   "useEnhanced": true,
- *   "model": "phone_call",
- *   "enableAutomaticPunctuation": true,
- *   "speechContexts": [ { "phrases": ["Linas Pedidos", "empanadas"] } ]
- * }
- */
-app.post("/stt", async (req, res) => {
-  try {
-    const audioContent = ensureString(req.body.audioContent, "");
-    if (!audioContent) {
-      return res.status(400).json({ error: "Falta 'audioContent' (Base64)." });
-    }
-
-    const languageCode = ensureString(req.body.languageCode, "es-CO");
-    const encoding = ensureString(req.body.encoding, "MP3"); // MP3 o LINEAR16
-    const sampleRateHertz = req.body.sampleRateHertz;
-    const enableAutomaticPunctuation = req.body.enableAutomaticPunctuation ?? true;
-
-    // Mejoras por defecto para audio telefónico
-    const useEnhanced = req.body.useEnhanced ?? true;
-    const model = ensureString(req.body.model, "phone_call");
-
-    // Speech contexts (sesgo para el vocabulario del negocio)
-    const speechContexts =
-      Array.isArray(req.body.speechContexts) && req.body.speechContexts.length
-        ? req.body.speechContexts
-        : [{ phrases: ["Linas Pedidos", "empanadas", "gaseosa", "domicilio", "combo", "coca cola"] }];
-
-    const config = {
-      languageCode,
-      encoding, // "MP3" o "LINEAR16"
-      // Importante: sampleRateHertz SOLO si usas LINEAR16 y conoces el valor REAL del WAV.
-      ...(encoding === "LINEAR16" && Number.isFinite(Number(sampleRateHertz))
-        ? { sampleRateHertz: Number(sampleRateHertz) }
-        : {}),
-      useEnhanced: isTruthy(useEnhanced),
-      model,
-      enableAutomaticPunctuation: isTruthy(enableAutomaticPunctuation),
-      speechContexts,
-    };
-
-    const request = {
-      audio: { content: audioContent },
-      config,
-    };
-
-    const [response] = await speechClient.recognize(request);
-
-    const alternatives =
-      response.results?.flatMap((r) => r.alternatives || []) || [];
-
-    const transcript = alternatives.map((a) => a.transcript?.trim()).filter(Boolean).join(" ");
-
-    return res.json({
-      transcript,
-      alternatives,
-      // para debug: comenta la línea siguiente si prefieres una respuesta mínima
-      raw: response,
+      voice: { languageCode: 'es-ES' }, // cambia a es-CO si tu cuenta lo soporta
+      audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: 8000 },
     });
-  } catch (err) {
-    console.error("STT error:", err);
-    return res.status(500).json({ error: String(err?.message || err) });
+    let audio = Buffer.from(resp.audioContent, 'base64');
+    // Si Google devolvió LINEAR16 crudo, lo envolvemos en WAV
+    if (audio.slice(0, 4).toString() !== 'RIFF') {
+      audio = makeWavFromLinear16(audio, 8000);
+    }
+    res.set('Content-Type', 'audio/wav').send(audio);
+  } catch (e) {
+    console.error('TTS error:', e.message);
+    res.type('text/plain').status(500).send('TTS error');
   }
 });
 
-// ---- Start ----
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`LinasPedidos Voice API escuchando en :${PORT}`);
+// STT: recibe RecordingUrl, transcribe y responde TwiML
+app.post('/stt', async (req, res) => {
+  try {
+    const recordingUrl = (req.body.RecordingUrl || req.body.RecordingUrl) || (req.body && req.body.RecordingUrl);
+    if (!recordingUrl) {
+      return res.type('text/xml').send('<Response><Say>No recibí audio.</Say></Response>');
+    }
+    let url = recordingUrl;
+    if (!url.endsWith('.wav') && !url.endsWith('.mp3')) url += '.wav';
+
+    const auth = (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN)
+      ? { username: process.env.TWILIO_ACCOUNT_SID, password: process.env.TWILIO_AUTH_TOKEN }
+      : undefined;
+
+    const dl = await axios.get(url, { responseType: 'arraybuffer', auth });
+    let wav = Buffer.from(dl.data);
+
+    // Si viene WAV, quita cabecera (44 bytes) para LINEAR16
+    let linear16 = wav;
+    if (wav.slice(0, 4).toString() === 'RIFF') {
+      linear16 = wav.slice(44);
+    }
+
+    const [sttResp] = await sttClient.recognize({
+      config: {
+        encoding: 'LINEAR16',
+        sampleRateHertz: 8000,
+        languageCode: 'es-ES',
+        enableAutomaticPunctuation: true,
+      },
+      audio: { content: linear16.toString('base64') },
+    });
+
+    let transcript = '';
+    if (sttResp.results && sttResp.results[0] && sttResp.results[0].alternatives[0]) {
+      transcript = sttResp.results[0].alternatives[0].transcript.trim();
+    }
+    const text = transcript || 'No pude entenderte. ¿Puedes repetir, por favor?';
+
+    const sayUrl = absUrl(req, '/tts', '?text=' + encodeURIComponent('Entendí: ' + text));
+    const nextUrl = absUrl(req, '/call');
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Play>${sayUrl}</Play>
+  <Redirect method="POST">${nextUrl}</Redirect>
+</Response>`;
+    res.type('text/xml').send(twiml);
+  } catch (e) {
+    console.error('STT error:', e.message);
+    res.type('text/xml').send('<Response><Say>Ocurrió un error procesando tu audio.</Say></Response>');
+  }
 });
+
+// Status callback (opcional)
+app.post('/status', express.urlencoded({ extended: true }), (req, res) => {
+  const d = req.body || {};
+  console.log(`[STATUS] ${d.CallSid} ${d.CallStatus} ${d.CallStatusCallbackEvent} From=${d.From} To=${d.To}`);
+  res.type('text/plain').send('OK');
+});
+
+// Lanzar
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`HTTP listo en puerto ${PORT}`));
