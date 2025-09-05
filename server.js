@@ -84,7 +84,7 @@ app.get('/tts', async (req, res) => {
     const text = String(req.query.text || 'Hola de prueba');
     const [resp] = await ttsClient.synthesizeSpeech({
       input: { text },
-      voice: { languageCode: 'es-CO', name: 'es-CO-Neural2-B' },
+      voice: { languageCode: 'es-CO', name: 'es-CO-Wavenet-A' },
       audioConfig: { audioEncoding: 'MP3' },
     });
 
