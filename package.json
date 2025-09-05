@@ -2,12 +2,13 @@
   "name": "linaspedidos-voice",
   "version": "1.0.0",
   "main": "server.js",
+  "engines": { "node": ">=18" },
   "scripts": { "start": "node server.js" },
   "dependencies": {
-    "@google-cloud/speech": "^6.3.0",
-    "@google-cloud/text-to-speech": "^5.2.0",
-    "axios": "^1.7.2",
-    "body-parser": "^1.20.3",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "body-parser": "^1.20.2",
+    "axios": "^1.7.0",
+    "@google-cloud/text-to-speech": "^5.3.0",
+    "@google-cloud/speech": "^6.5.0"
   }
 }
