@@ -84,7 +84,7 @@ app.get('/tts', async (req, res) => {
     const text = String(req.query.text || 'Hola de prueba');
     const [resp] = await ttsClient.synthesizeSpeech({
       input: { text },
-      voice: { languageCode: 'es-CO', name: 'es-CO-Wavenet-A' },
+      voice: { languageCode: 'es-CO', name: 'es-CO-Standard-A' },
       audioConfig: { audioEncoding: 'MP3' },
     });
 
@@ -98,3 +98,4 @@ app.get('/tts', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`HTTP server listening on ${PORT}`));
+
