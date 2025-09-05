@@ -4,10 +4,10 @@
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "dependencies": {
+    "@google-cloud/speech": "^6.3.0",
+    "@google-cloud/text-to-speech": "^5.2.0",
     "axios": "^1.7.2",
     "body-parser": "^1.20.3",
-    "express": "^4.19.2",
-    "@google-cloud/speech": "^6.3.0",
-    "@google-cloud/text-to-speech": "^5.2.0"
+    "express": "^4.19.2"
   }
 }
