@@ -42,6 +42,48 @@ try {
   console.error('Error inicializando credenciales GCP:', e.message);
 }
 
+// --- Nueva Lógica de Síntesis Robusta ---
+
+const preferredVoices = [
+  { languageCode: 'es-CO', name: 'es-CO-Wavenet-A' },
+  { languageCode: 'es-MX', name: 'es-MX-Neural2-A' },
+  { languageCode: 'es-ES', name: 'es-ES-Neural2-B' },
+  { languageCode: 'es-CO', name: 'es-CO-Standard-A' } // Añadido como otra opción segura
+];
+
+async function synthesize(text) {
+  for (const v of preferredVoices) {
+    try {
+      const [r] = await ttsClient.synthesizeSpeech({
+        input: { text },
+        voice: v,
+        audioConfig: { audioEncoding: 'MP3' }
+      });
+      console.log(`TTS synthesised successfully with voice: ${v.name}`);
+      return r.audioContent;
+    } catch (e) {
+      console.warn(`TTS failed for voice ${v.name}:`, e.message);
+      // Intenta el siguiente
+    }
+  }
+
+  // Último recurso: sin 'name' para que Google elija la voz por defecto
+  try {
+    console.log('All preferred voices failed. Trying default voice for es-CO...');
+    const [r] = await ttsClient.synthesizeSpeech({
+      input: { text },
+      voice: { languageCode: 'es-CO', ssmlGender: 'FEMALE' },
+      audioConfig: { audioEncoding: 'MP3' }
+    });
+    console.log('TTS synthesised successfully with default voice.');
+    return r.audioContent;
+  } catch (e) {
+    console.error('TTS default voice also failed:', e);
+    throw e; // Si incluso el por defecto falla, lanza el error.
+  }
+}
+
+
 // --- Endpoints básicos ---
 app.get('/', (_, res) => res.type('text/plain').send('LinasPedidos Voice API'));
 app.get('/health', (_, res) => res.type('text/plain').send('OK'));
@@ -64,7 +106,6 @@ app.get('/call', (req, res) => {
 });
 
 // (Stub temporal) Recibe RecordingUrl y cuelga con un mensaje.
-// Luego sustituimos por STT real descargando y transcribiendo el audio.
 app.post('/stt', (req, res) => {
   console.log('STT webhook payload:', req.body);
   const twiml = `
@@ -76,26 +117,21 @@ app.post('/stt', (req, res) => {
   res.type('text/xml').send(twiml);
 });
 
-// TTS con Google: devuelve MP3 que Twilio <Play> soporta.
+// Endpoint TTS que ahora usa la lógica de síntesis robusta
 app.get('/tts', async (req, res) => {
   try {
     if (!ttsClient) throw new Error('TTS client not initialized');
-
-    const text = String(req.query.text || 'Hola de prueba');
-    const [resp] = await ttsClient.synthesizeSpeech({
-      input: { text },
-      voice: { languageCode: 'es-CO', name: 'es-CO-Standard-A' },
-      audioConfig: { audioEncoding: 'MP3' },
-    });
-
-    const audio = Buffer.from(resp.audioContent, 'base64');
-    res.set('Content-Type', 'audio/mpeg').send(audio);
+    
+    const text = (req.query.text || 'Hola de prueba.').slice(0, 500);
+    const audio = await synthesize(text);
+    
+    res.set('Content-Type', 'audio/mpeg').send(Buffer.from(audio, 'base64'));
   } catch (err) {
-    console.error('TTS error:', err?.message);
+    console.error('TTS endpoint error after all fallbacks:', err?.message);
     res.status(500).type('text/plain').send('TTS error');
   }
 });
 
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`HTTP server listening on ${PORT}`));
-
