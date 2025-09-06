@@ -59,7 +59,6 @@ async function sayToCall(callSid, text, { restart = true } = {}) {
 
 /* ========== Utilidades de audio: μ-law (Twilio) -> LINEAR16 (Google) ========== */
 function muLawToLinearSample(u8) {
-  // u-law to linear16 (Int16) – tabla estándar
   u8 = ~u8 & 0xff;
   const sign = (u8 & 0x80) ? -1 : 1;
   let exponent = (u8 >> 4) & 0x07;
@@ -85,7 +84,6 @@ const states = new Map(); // streamSid -> { callSid, googleStream, open }
 function startGoogleStream(state) {
   if (state.googleStream) return;
 
-  // 1. Llama a streamingRecognize SIN argumentos para obtener el stream.
   const recognizeStream = speechClient
     .streamingRecognize()
     .on('error', (err) => {
@@ -104,7 +102,6 @@ function startGoogleStream(state) {
 
       if (isFinal) {
         console.log('[STT][FINAL]', transcript);
-        // Responder y reanudar stream
         sayToCall(state.callSid, `Recibí: ${transcript}. Gracias.`, { restart: true })
           .catch((e) => console.error('[Twilio update error]', e.message));
       } else {
@@ -112,7 +109,6 @@ function startGoogleStream(state) {
       }
     });
 
-  // 2. Escribe la configuración como el PRIMER mensaje en el stream.
   recognizeStream.write({
     config: {
       encoding: 'LINEAR16',
@@ -139,10 +135,7 @@ function stopGoogleStream(state) {
 app.get('/', (_, res) => res.type('text/plain').send('LinasPedidos Voice API'));
 app.get('/health', (_, res) => res.type('text/plain').send('OK'));
 
-/* TwiML de arranque de llamada:
-   - Inicia Media Stream (wss)
-   - Habla un mensaje corto
-   - Pausa (para quedar “escuchando”) */
+/* TwiML de arranque de llamada */
 app.get('/call', (req, res) => {
   const wssUrl = `wss://${req.get('host')}/media`;
   const twiml = `
@@ -210,15 +203,12 @@ wss.on('connection', (ws) => {
       const state = states.get(streamSid);
       if (!state) return;
 
-      // Audio de Twilio llega en μ-law base64 8kHz
       const linear16 = mulawBase64ToLinear16Buffer(data.media.payload);
 
       try {
         if (!state.googleStream) startGoogleStream(state);
         state.googleStream.write({ audioContent: linear16 });
       } catch (e) {
-        // Evita “Cannot call write after a stream was destroyed”
-        // solo loguea y continúa
         console.warn('[STT][WARN]', e.message);
       }
       return;
@@ -249,5 +239,5 @@ wss.on('connection', (ws) => {
 /* ========== Arranque ========== */
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`HTTP/WS listening on ${PORT}`));
-console.log('--- [VERSIÓN CORRECTA] El servidor con la solución para MalformedData está corriendo. ---');
 
+console.log('--- [VERSIÓN CORRECTA] El servidor con la solución para MalformedData está corriendo. ---');
