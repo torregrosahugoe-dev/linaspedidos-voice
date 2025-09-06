@@ -1,19 +1,18 @@
 // server.js
+// ==========================
+// LinasPedidos - Voice API (Twilio Media Streams + Google STT)
+// ==========================
+
 const http = require('http');
 const express = require('express');
 const bodyParser = require('body-parser');
 const WebSocket = require('ws');
+const twilio = require('twilio');
 
-// Google TTS (ya lo tenías)
+const { SpeechClient } = require('@google-cloud/speech');
 const { TextToSpeechClient } = require('@google-cloud/text-to-speech');
-// Google STT (streaming)
-const { v1p1beta1: speech } = require('@google-cloud/speech');
 
-const app = express();
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use(bodyParser.json());
-
-// --- Cargar credenciales GCP desde env ---
+// ---------- Utils: Cargar credenciales GCP ----------
 function getGcpCreds() {
   const raw =
     process.env.GOOGLE_APPLICATION_CREDENTIALS ||
@@ -21,7 +20,7 @@ function getGcpCreds() {
 
   if (!raw) {
     throw new Error(
-      'Missing GOOGLE_APPLICATION_CREDENTIALS(_JSON) env var with service-account JSON'
+      'Faltan credenciales GCP. Define GOOGLE_APPLICATION_CREDENTIALS(_JSON) con el JSON de Service Account.'
     );
   }
   const info = JSON.parse(raw);
@@ -37,17 +36,71 @@ function getGcpCreds() {
   };
 }
 
-let ttsClient, sttClient;
+// ---------- Inicializar clientes (GCP / Twilio) ----------
+let speechClient, ttsClient;
 try {
   const gcp = getGcpCreds();
+  speechClient = new SpeechClient(gcp);
   ttsClient = new TextToSpeechClient(gcp);
-  sttClient = new speech.SpeechClient(gcp);
-  console.log('GCP clients OK. Project:', gcp.projectId);
+  console.log('[GCP] Credenciales OK. Proyecto:', gcp.projectId);
 } catch (e) {
-  console.error('GCP creds init error:', e.message);
+  console.error('[GCP] Error de credenciales:', e.message);
 }
 
-// ---------- TTS (robusto) ----------
+const hasTwilioCreds =
+  !!process.env.TWILIO_ACCOUNT_SID && !!process.env.TWILIO_AUTH_TOKEN;
+const twilioClient = hasTwilioCreds
+  ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
+  : null;
+
+if (twilioClient) {
+  console.log('[Twilio] Cliente REST inicializado.');
+} else {
+  console.warn(
+    '[Twilio] Sin credenciales (TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN). No se podrán actualizar llamadas.'
+  );
+}
+
+// ---------- App HTTP ----------
+const app = express();
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.json());
+
+// Salud y raíz
+app.get('/', (_, res) => res.type('text/plain').send('LinasPedidos Voice API'));
+app.get('/health', (_, res) => res.type('text/plain').send('OK'));
+
+// ---------- Webhook de estado (opcional pero recomendado) ----------
+app.post('/status', (req, res) => {
+  console.log('[STATUS]', {
+    CallSid: req.body.CallSid,
+    CallStatus: req.body.CallStatus,
+    CallDuration: req.body.CallDuration,
+    Timestamp: new Date().toISOString(),
+  });
+  res.sendStatus(200);
+});
+
+// ---------- TwiML de inicio de llamada: comienza Stream + saluda ----------
+app.get('/call', (req, res) => {
+  const host = req.get('host');
+  const wsUrl = `wss://${host}/media`;
+
+  const twiml = `
+<Response>
+  <Start>
+    <Stream url="${wsUrl}" />
+  </Start>
+  <Say language="es-MX">Hola, bienvenido a Linas Pedidos. Estoy escuchando.</Say>
+  <!-- Mantiene la llamada abierta mientras el WebSocket procesa audio.
+       Este bloque puede ser interrumpido si actualizamos la llamada vía API -->
+  <Pause length="60"/>
+</Response>`.trim();
+
+  res.type('text/xml').send(twiml);
+});
+
+// ---------- (Opcional) Endpoint TTS con fallback de voces ----------
 const preferredVoices = [
   { languageCode: 'es-CO', name: 'es-CO-Wavenet-A' },
   { languageCode: 'es-MX', name: 'es-MX-Neural2-A' },
@@ -55,7 +108,8 @@ const preferredVoices = [
   { languageCode: 'es-CO', name: 'es-CO-Standard-A' },
 ];
 
-async function synthesize(text) {
+async function synthesizeTTS(text) {
+  if (!ttsClient) throw new Error('TTS client not initialized');
   for (const v of preferredVoices) {
     try {
       const [r] = await ttsClient.synthesizeSpeech({
@@ -63,163 +117,179 @@ async function synthesize(text) {
         voice: v,
         audioConfig: { audioEncoding: 'MP3' },
       });
-      console.log(`TTS OK with voice: ${v.name}`);
+      console.log(`[TTS] OK con voz: ${v.name}`);
       return r.audioContent;
     } catch (e) {
-      console.warn(`TTS failed ${v.name}:`, e.message);
+      console.warn(`[TTS] Falló voz ${v.name}: ${e.message}`);
     }
   }
-  // Default fallback
+  // Último recurso: voz por defecto
   const [r] = await ttsClient.synthesizeSpeech({
     input: { text },
     voice: { languageCode: 'es-CO', ssmlGender: 'FEMALE' },
     audioConfig: { audioEncoding: 'MP3' },
   });
+  console.log('[TTS] OK con voz por defecto');
   return r.audioContent;
 }
 
-// ---------- Endpoints básicos ----------
-app.get('/', (_, res) => res.type('text/plain').send('LinasPedidos Voice API'));
-app.get('/health', (_, res) => res.type('text/plain').send('OK'));
-
-// TwiML inicial: arranca Media Stream hacia wss://.../media
-app.get('/call', (req, res) => {
-  const wsUrl = `wss://${req.get('host')}/media`;
-  const twiml = `
-<Response>
-  <Start>
-    <Stream url="${wsUrl}" />
-  </Start>
-  <Say language="es-MX">Conectando con el asistente. Un momento por favor.</Say>
-  <!-- Mantén la llamada viva mientras el WS está abierto -->
-  <Pause length="600"/>
-</Response>`.trim();
-  res.type('text/xml').send(twiml);
-});
-
-// (si lo sigues necesitando)
-app.post('/stt', (req, res) => {
-  console.log('STT webhook payload (no-WS path):', req.body);
-  res.type('text/xml').send(
-    `<Response><Say language="es-MX">Gracias. Estamos procesando tu pedido.</Say><Hangup/></Response>`
-  );
-});
-
-// TTS HTTP (lo usa <Play> si quisieras)
 app.get('/tts', async (req, res) => {
   try {
-    if (!ttsClient) throw new Error('TTS client not initialized');
     const text = (req.query.text || 'Hola de prueba.').slice(0, 500);
-    const audio = await synthesize(text);
+    const audio = await synthesizeTTS(text);
     res.set('Content-Type', 'audio/mpeg').send(Buffer.from(audio, 'base64'));
   } catch (err) {
-    console.error('TTS endpoint error:', err?.message);
+    console.error('[TTS] Error:', err?.message);
     res.status(500).type('text/plain').send('TTS error');
   }
 });
 
-// ---------- WebSocket: Twilio Media Streams -> Google STT ----------
+// ---------- Endpoint TwiML de "decir y volver a escuchar" ----------
+app.get('/say', (req, res) => {
+  const host = req.get('host');
+  const text =
+    (req.query.text || 'Tuvimos un problema procesando tu pedido.').slice(
+      0,
+      500
+    );
+
+  // Habla el texto y regresa a /call para reabrir el stream (siguiente turno)
+  const twiml = `
+<Response>
+  <Say language="es-MX">${text}</Say>
+  <Redirect>https://${host}/call</Redirect>
+</Response>`.trim();
+
+  res.type('text/xml').send(twiml);
+});
+
+// ---------- Servidor HTTP + WebSocket (Media Streams) ----------
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/media' });
 
-// Helper: crea un stream de reconocimiento por llamada
-function makeStreamingRequest({ languageCode = 'es-CO' } = {}) {
-  return {
-    config: {
-      encoding: 'MULAW',          // Twilio envía PCMU (μ-law) 8kHz
-      sampleRateHertz: 8000,
-      languageCode,
-      enableAutomaticPunctuation: true,
-      model: 'phone_call',
-      useEnhanced: true,
-    },
-    interimResults: true,
-    singleUtterance: false,       // seguimos escuchando hasta que cerremos
-  };
-}
+wss.on('connection', (ws, req) => {
+  const baseUrl = `https://${req.headers['host']}`;
+  console.log('[WS] Conexión entrante /media');
 
-wss.on('connection', (ws) => {
-  console.log('[WS] Client connected');
-
-  let recognizeStream = null;
   let callSid = null;
-  let streamSid = null;
+  let recognizeStream = null;
+  let responded = false; // para evitar múltiples respuestas por la misma conexión
 
-  // Abre un nuevo stream STT
-  const openSttStream = (lang = 'es-CO') => {
-    const request = makeStreamingRequest({ languageCode: lang });
-    recognizeStream = sttClient
+  // Crea el stream de Google STT
+  function createRecognizeStream() {
+    if (!speechClient) {
+      console.error('[STT] SpeechClient no inicializado');
+      return null;
+    }
+    const request = {
+      config: {
+        encoding: 'MULAW',          // Twilio envía µ-law 8k
+        sampleRateHertz: 8000,
+        languageCode: 'es-CO',
+        alternativeLanguageCodes: ['es-MX', 'es-ES'],
+        enableAutomaticPunctuation: true,
+        model: 'phone_call',
+      },
+      interimResults: true,
+    };
+
+    const stream = speechClient
       .streamingRecognize(request)
-      .on('error', (err) => {
-        console.error('[STT] streaming error:', err.message);
-        try { recognizeStream.destroy(); } catch {}
-        recognizeStream = null;
-      })
+      .on('error', (err) => console.error('[STT][ERROR]', err.message))
       .on('data', (data) => {
-        // Maneja parciales/finales
-        const results = data.results || [];
-        if (!results.length) return;
-        const alt = results[0].alternatives?.[0];
-        if (!alt) return;
+        const result = data.results?.[0];
+        if (!result) return;
 
-        if (results[0].isFinal) {
-          console.log(`[STT][FINAL] ${alt.transcript}  (conf=${alt.confidence?.toFixed?.(2) ?? '-'})`);
-          // Aquí: en siguientes iteraciones, invocar NLU o responder por voz
+        const transcript = result.alternatives?.[0]?.transcript || '';
+        if (result.isFinal) {
+          console.log('[STT][FINAL]:', transcript);
+          // Aquí decides la lógica de negocio. Por demo, avisamos y reiniciamos turno:
+          if (!responded && twilioClient && callSid) {
+            responded = true;
+            const sayUrl = `${baseUrl}/say?text=${encodeURIComponent(
+              'Tuvimos un problema procesando tu pedido.'
+            )}`;
+            twilioClient
+              .calls(callSid)
+              .update({ url: sayUrl, method: 'GET' }) // redirige TwiML de la llamada
+              .then(() =>
+                console.log('[Twilio] Llamada actualizada → /say → /call')
+              )
+              .catch((e) =>
+                console.error('[Twilio] Error al actualizar llamada:', e.message)
+              );
+          }
         } else {
-          console.log(`[STT][PARCIAL] ${alt.transcript}`);
+          console.log('[STT][PARCIAL]:', transcript);
         }
       });
-  };
+
+    return stream;
+  }
+
+  recognizeStream = createRecognizeStream();
 
   ws.on('message', (msg) => {
     let data;
-    try { data = JSON.parse(msg); } catch { return; }
+    try {
+      data = JSON.parse(msg.toString());
+    } catch (_e) {
+      return;
+    }
 
     switch (data.event) {
-      case 'start': {
-        callSid = data.start?.callSid;
-        streamSid = data.start?.streamSid;
-        console.log(`[WS] start  callSid=${callSid}  streamSid=${streamSid}`);
-        // Idioma por defecto; puedes decidirlo por caller/country
-        openSttStream('es-CO');
+      case 'start':
+        callSid = data.start?.callSid || null;
+        console.log(`[WS] start (CallSid: ${callSid || 'desconocido'})`);
         break;
-      }
-      case 'media': {
-        // Audio base64 μ-law 8kHz
+
+      case 'media':
+        // payload es base64 (mulaw 8k)
         if (recognizeStream) {
           const audio = Buffer.from(data.media.payload, 'base64');
-          recognizeStream.write({ audio_content: audio });
+          recognizeStream.write(audio);
         }
         break;
-      }
-      case 'mark': {
-        // Opcional: marcas que tú envíes
+
+      case 'mark':
+        // útil si envías marcas desde Twilio; no lo usamos aquí
         break;
-      }
-      case 'stop': {
+
+      case 'stop':
         console.log('[WS] stop');
-        try { recognizeStream?.end(); } catch {}
-        recognizeStream = null;
-        ws.close();
+        if (recognizeStream) {
+          try {
+            recognizeStream.end();
+          } catch (_) {}
+        }
         break;
-      }
+
       default:
         break;
     }
   });
 
   ws.on('close', () => {
-    console.log('[WS] closed');
-    try { recognizeStream?.end(); } catch {}
-    recognizeStream = null;
+    console.log('[WS] close');
+    if (recognizeStream) {
+      try {
+        recognizeStream.end();
+      } catch (_) {}
+    }
   });
 
   ws.on('error', (err) => {
-    console.error('[WS] error:', err.message);
-    try { recognizeStream?.end(); } catch {}
-    recognizeStream = null;
+    console.error('[WS][ERROR]', err.message);
+    if (recognizeStream) {
+      try {
+        recognizeStream.end();
+      } catch (_) {}
+    }
   });
 });
 
+// ---------- Arranque ----------
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`HTTP+WS listening on ${PORT}`));
+server.listen(PORT, () =>
+  console.log(`[HTTP] Escuchando en puerto ${PORT}`)
+);
