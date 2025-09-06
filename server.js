@@ -207,7 +207,9 @@ wss.on('connection', (ws) => {
 
       try {
         if (!state.googleStream) startGoogleStream(state);
-        state.googleStream.write({ audioContent: linear16 });
+        // --- LA CORRECCIÓN FINAL ESTÁ AQUÍ ---
+        // Se envía el audio directamente, sin envolverlo en un objeto.
+        state.googleStream.write(linear16);
       } catch (e) {
         console.warn('[STT][WARN]', e.message);
       }
@@ -239,5 +241,3 @@ wss.on('connection', (ws) => {
 /* ========== Arranque ========== */
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`HTTP/WS listening on ${PORT}`));
-
-console.log('--- [VERSIÓN CORRECTA] El servidor con la solución para MalformedData está corriendo. ---');
