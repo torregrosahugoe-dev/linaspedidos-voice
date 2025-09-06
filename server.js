@@ -109,15 +109,19 @@ function startGoogleStream(state) {
       }
     });
 
+  // --- LA CORRECCIÓN FINAL ESTÁ AQUÍ ---
+  // El objeto de configuración completo está envuelto en una propiedad "streamingConfig".
   recognizeStream.write({
-    config: {
-      encoding: 'LINEAR16',
-      sampleRateHertz: 8000,
-      languageCode: 'es-CO',
-      model: 'phone_call',
-      enableAutomaticPunctuation: true,
-    },
-    interimResults: true,
+    streamingConfig: {
+      config: {
+        encoding: 'LINEAR16',
+        sampleRateHertz: 8000,
+        languageCode: 'es-CO',
+        model: 'phone_call',
+        enableAutomaticPunctuation: true,
+      },
+      interimResults: true,
+    }
   });
 
   state.googleStream = recognizeStream;
@@ -207,8 +211,6 @@ wss.on('connection', (ws) => {
 
       try {
         if (!state.googleStream) startGoogleStream(state);
-        // --- LA CORRECCIÓN FINAL ESTÁ AQUÍ ---
-        // Se envía el audio directamente, sin envolverlo en un objeto.
         state.googleStream.write(linear16);
       } catch (e) {
         console.warn('[STT][WARN]', e.message);
