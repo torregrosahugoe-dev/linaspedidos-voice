@@ -1,19 +1,19 @@
 {
   "name": "linaspedidos-voice",
   "version": "1.0.0",
-  "description": "LinasPedidos Voice API (Twilio Media Streams + Google STT)",
+  "description": "Twilio Voice + Media Streams + Google STT (LinasPedidos)",
   "main": "server.js",
-  "type": "commonjs",
-  "engines": { "node": ">=18.x" },
   "scripts": {
     "start": "node server.js"
   },
+  "engines": {
+    "node": ">=18 <22"
+  },
   "dependencies": {
-    "@google-cloud/speech": "^6.5.0",
-    "@google-cloud/text-to-speech": "^5.6.0",
+    "@google-cloud/speech": "^6.6.0",
     "body-parser": "^1.20.2",
     "express": "^4.19.2",
-    "twilio": "^4.22.0",
+    "twilio": "^4.23.0",
     "ws": "^8.18.0"
   }
 }
