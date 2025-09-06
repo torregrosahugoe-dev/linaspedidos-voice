@@ -249,3 +249,5 @@ wss.on('connection', (ws) => {
 /* ========== Arranque ========== */
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`HTTP/WS listening on ${PORT}`));
+console.log('--- [VERSIÓN CORRECTA] El servidor con la solución para MalformedData está corriendo. ---');
+
